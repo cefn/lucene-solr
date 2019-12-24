@@ -49,40 +49,48 @@ public class DirectSolrSpellCheckerTest extends SolrTestCaseJ4 {
     queryConverter = new SimpleQueryConverter();
     queryConverter.init(new NamedList());
   }
-  
+
   @Test
-  public void test() throws Exception {
-    DirectSolrSpellChecker checker = new DirectSolrSpellChecker();
-    NamedList spellchecker = new NamedList();
-    spellchecker.add("classname", DirectSolrSpellChecker.class.getName());
-    spellchecker.add(SolrSpellChecker.FIELD, "teststop");
-    spellchecker.add(DirectSolrSpellChecker.MINQUERYLENGTH, 2); // we will try "fob"
+  public void testCorrectableSpelling() throws Exception {
+    String incorrectSpelling = "fob";
+    String correctSpelling = "foo";
+    Map<String, Integer> suggestions = getSuggestionsForFirstToken(incorrectSpelling, 2, null);
+    Map.Entry<String, Integer> firstSuggestion = suggestions.entrySet().iterator().next();
+    String firstSpelling = firstSuggestion.getKey();
+    Integer firstFrequency = firstSuggestion.getValue();
+    assertEquals("'" + firstSpelling + "' is not equal to '" + correctSpelling + "'", firstSpelling, correctSpelling);
+    assertFalse("'" + firstFrequency + "' equals: " + SpellingResult.NO_FREQUENCY_INFO, firstFrequency == SpellingResult.NO_FREQUENCY_INFO);
+  }
 
-    SolrCore core = h.getCore();
-    checker.init(spellchecker, core);
+  @Test
+  public void testUncorrectableSpelling() throws Exception {
+    String query = "super";
+    Map<String, Integer> suggestions = getSuggestionsForFirstToken(query, 2, null);
+    assertTrue("suggestions should be empty", suggestions.isEmpty());
+  }
 
-    h.getCore().withSearcher(searcher -> {
+  @Test
+  public void testAboveMaxLength() throws Exception {
+    String query = "anothar";
+    Map<String, Integer> suggestionFrequencies = getSuggestionsForFirstToken(query, 2, 4);
+    assertTrue("Misspelled term '" + query + "' should not get suggestions if MAXQUERYLENGTH < term length", suggestionFrequencies.isEmpty());
+  }
 
-      // check that 'fob' is corrected to 'foo'
-      Collection<Token> tokens = queryConverter.convert("fob");
-      SpellingOptions spellOpts = new SpellingOptions(tokens, searcher.getIndexReader());
-      SpellingResult result = checker.getSuggestions(spellOpts);
-      assertNotNull("result shouldn't be null", result);
-      Map<String, Integer> suggestions = result.get(tokens.iterator().next());
-      assertFalse("suggestions shouldn't be empty", suggestions.isEmpty());
-      Map.Entry<String, Integer> entry = suggestions.entrySet().iterator().next();
-      assertEquals(entry.getKey() + " is not equal to " + "foo", entry.getKey(), "foo");
-      assertFalse(entry.getValue() + " equals: " + SpellingResult.NO_FREQUENCY_INFO, entry.getValue() == SpellingResult.NO_FREQUENCY_INFO);
+  @Test
+  public void testAtMaxLength() throws Exception {
+    String query = "anothar";
+    Map<String, Integer> suggestionFrequencies = getSuggestionsForFirstToken(query, 2, 7);
+    assertTrue("Misspelled term '" + query + "' with termLength == maxQueryLength should get exactly one suggestion", suggestionFrequencies.size() == 1);
+    String firstSuggestion = suggestionFrequencies.keySet().iterator().next();
+    assertEquals("'" + firstSuggestion + "' is not equal to 'another'", firstSuggestion, "another");
+  }
 
-      // check that 'super' is *not* corrected
-      spellOpts.tokens = queryConverter.convert("super");
-      result = checker.getSuggestions(spellOpts);
-      assertNotNull("result shouldn't be null", result);
-      suggestions = result.get(spellOpts.tokens.iterator().next());
-      assertNotNull("suggestions shouldn't be null", suggestions);
-      assertTrue("suggestions should be empty", suggestions.isEmpty());
-      return null;
-    });
+  @Test
+  public void testBelowMaxLength() throws Exception {
+    Map<String, Integer> suggestionFrequencies = getSuggestionsForFirstToken("anothar", 2, 8);
+    assertTrue("Misspelled term with termLength < maxQueryLength should get exactly one firstSuggestion", suggestionFrequencies.size() == 1);
+    String firstSuggestion = suggestionFrequencies.keySet().iterator().next();
+    assertEquals("'" + firstSuggestion + "' is not equal to 'another'", firstSuggestion, "another");
   }
 
   @Test
@@ -95,44 +103,30 @@ public class DirectSolrSpellCheckerTest extends SolrTestCaseJ4 {
     );
   }
 
-  @Test
-  public void testMaxQueryLength() throws Exception {
-    testMaxQueryLength(true);
-    testMaxQueryLength(false);
+
+  private Map<String,Integer> getSuggestionsForFirstToken(String query, Integer minQueryLength, Integer maxQueryLength) throws Exception{
+    Collection<Token> queryTokens = queryConverter.convert(query);
+    SpellingResult spellingResult = getCorpusSpellingSuggestions(queryTokens, minQueryLength, maxQueryLength);
+
+    Token firstToken = queryTokens.iterator().next();
+    Map<String,Integer> firstTokenSuggestions = spellingResult.get(firstToken);
+    assertNotNull("firstTokenSuggestions collection should never be null", firstTokenSuggestions);
+    return firstTokenSuggestions;
   }
 
-  private void testMaxQueryLength(Boolean limitQueryLength) throws Exception {
-
+  private SpellingResult getCorpusSpellingSuggestions(Collection<Token> tokens, Integer minQueryLength, Integer maxQueryLength) throws Exception{
     DirectSolrSpellChecker checker = new DirectSolrSpellChecker();
-    NamedList spellchecker = new NamedList<>();
-    spellchecker.add("classname", DirectSolrSpellChecker.class.getName());
-    spellchecker.add(SolrSpellChecker.FIELD, "teststop");
-    spellchecker.add(DirectSolrSpellChecker.MINQUERYLENGTH, 2);
-
-    // demonstrate that "anothar" is not corrected when maxQueryLength is set to a small number
-    if (limitQueryLength) spellchecker.add(DirectSolrSpellChecker.MAXQUERYLENGTH, 4);
-
+    NamedList checkerConfig = new NamedList<>();
+    checkerConfig.add("classname", DirectSolrSpellChecker.class.getName());
+    checkerConfig.add(SolrSpellChecker.FIELD, "teststop");
+    if(minQueryLength != null) checkerConfig.add(DirectSolrSpellChecker.MINQUERYLENGTH, minQueryLength);
+    if(maxQueryLength != null) checkerConfig.add(DirectSolrSpellChecker.MAXQUERYLENGTH, maxQueryLength);
     SolrCore core = h.getCore();
-    checker.init(spellchecker, core);
-
-    h.getCore().withSearcher(searcher -> {
-      Collection<Token> tokens = queryConverter.convert("anothar");
+    checker.init(checkerConfig, core);
+    return h.getCore().withSearcher(searcher -> {
       SpellingOptions spellOpts = new SpellingOptions(tokens, searcher.getIndexReader());
-      SpellingResult result = checker.getSuggestions(spellOpts);
-      assertNotNull("result shouldn't be null", result);
-      Map<String, Integer> suggestions = result.get(tokens.iterator().next());
-      assertNotNull("suggestions shouldn't be null", suggestions);
-
-      if (limitQueryLength) {
-        assertTrue("suggestions should be empty", suggestions.isEmpty());
-      } else {
-        assertFalse("suggestions shouldn't be empty", suggestions.isEmpty());
-        Map.Entry<String, Integer> entry = suggestions.entrySet().iterator().next();
-        assertEquals(entry.getKey() + " is not equal to 'another'", entry.getKey(), "another");
-      }
-
-      return null;
+      return checker.getSuggestions(spellOpts);
     });
   }
-  
+
 }
